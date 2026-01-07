@@ -60,6 +60,7 @@ jobs:
 
   # Release Job - only runs on manual trigger
   release-publish:
+    needs: ci-checks
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
