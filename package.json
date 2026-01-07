@@ -1,0 +1,27 @@
+{
+  "name": "utils",
+  "description": "Common utilities to use across projects.",
+  "keywords": [],
+  "license": "ISC",
+  "main": "./lib/index.cjs",
+  "module": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "npx tsup",
+    "format": "biome format .",
+    "lint": "biome check . && biome lint --error-on-warnings .",
+    "test": "jest"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.3.11",
+    "@types/jest": "29.5.14",
+    "jest-environment-jsdom": "30.2.0",
+    "ts-jest": "29.4.6",
+    "tsup": "8.5.1",
+    "typescript": "5.8.2"
+  },
+  "dependencies": {
+    "@fingerprintjs/fingerprintjs": "4.6.1"
+  }
+}
