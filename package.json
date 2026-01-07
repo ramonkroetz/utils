@@ -23,5 +23,6 @@
   },
   "dependencies": {
     "@fingerprintjs/fingerprintjs": "4.6.1"
-  }
+  },
+  "version": "1.0.0"
 }
