@@ -58,6 +58,7 @@ jobs:
           echo "Branch: ${{ github.ref }}"
           echo "Commit: ${{ github.sha }}"
 
+  # Release Job - only runs on manual trigger
   release-publish:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -169,6 +170,16 @@ jobs:
           echo "type=$RELEASE_TYPE" >> $GITHUB_OUTPUT
           echo "tag=$NEW_TAG" >> $GITHUB_OUTPUT
 
+      - name: Extract clean version number
+        id: extract-version
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          # Remove the 'v' prefix
+          CLEAN_VERSION="${TAG#v}"
+          echo "RELEASE_VERSION=$CLEAN_VERSION" >> $GITHUB_ENV
+          echo "clean_version=$CLEAN_VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted clean version: $CLEAN_VERSION"
+
       - name: Confirm release
         if: steps.version.outputs.tag
         run: |
@@ -178,11 +189,12 @@ jobs:
           echo "New version: ${{ steps.version.outputs.tag }}"
           echo "Release type: ${{ steps.version.outputs.type }}"
           echo "Current version: ${{ env.TAG_NAME }}"
+          echo "Clean version: ${{ steps.extract-version.outputs.clean_version }}"
           echo "========================================="
           echo "This will:"
           echo "1. Create tag: ${{ steps.version.outputs.tag }}"
           echo "2. Create GitHub Release"
-          echo "3. Create release branch: release/${{ steps.version.outputs.tag#v }}"
+          echo "3. Create release branch: release/${{ steps.extract-version.outputs.clean_version }}"
           echo "========================================="
 
       - name: Create Git Tag
@@ -214,33 +226,26 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract version number
-        id: extract-version
-        run: |
-          RELEASE_VERSION="${{ steps.version.outputs.tag }}"
-          # Remove the 'v' prefix
-          CLEAN_VERSION="${RELEASE_VERSION#v}"
-          echo "RELEASE_VERSION=$CLEAN_VERSION" >> $GITHUB_ENV
-          echo "release_version=$CLEAN_VERSION" >> $GITHUB_OUTPUT
-
       - name: Create and push release branch
         if: steps.version.outputs.tag
         run: |
           git config --global user.name "${GITHUB_ACTOR}"
           git config --global user.email "${GITHUB_ACTOR}@users.noreply.github.com"
           
-          # Create release branch
-          git checkout -b release/${{ env.RELEASE_VERSION }}
+          # Create release branch using the clean version
+          RELEASE_VERSION="${{ steps.extract-version.outputs.clean_version }}"
+          echo "Creating release branch: release/$RELEASE_VERSION"
+          git checkout -b release/$RELEASE_VERSION
           
           # Update package.json version (without creating a tag)
-          npm version ${{ env.RELEASE_VERSION }} --no-git-tag-version --allow-same-version
+          npm version $RELEASE_VERSION --no-git-tag-version --allow-same-version
           
           # Commit the version change
           git add package.json
-          git commit -m "chore: update version to ${{ env.RELEASE_VERSION }}"
+          git commit -m "chore: update version to $RELEASE_VERSION"
           
           # Push to remote
-          git push --set-upstream origin release/${{ env.RELEASE_VERSION }}
+          git push --set-upstream origin release/$RELEASE_VERSION
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -252,11 +257,11 @@ jobs:
           if [[ "${{ steps.version.outputs.tag }}" != "" ]]; then
             echo "✅ Release created: ${{ steps.version.outputs.tag }}"
             echo "📋 Release type: ${{ steps.version.outputs.type }}"
-            echo "🌿 Release branch: release/${{ env.RELEASE_VERSION }}"
+            echo "🌿 Release branch: release/${{ steps.extract-version.outputs.clean_version }}"
             echo ""
             echo "Next steps:"
             echo "1. Review the release at: https://github.com/${{ github.repository }}/releases"
-            echo "2. The release branch 'release/${{ env.RELEASE_VERSION }}' has been created"
+            echo "2. The release branch 'release/${{ steps.extract-version.outputs.clean_version }}' has been created"
           else
             echo "❌ No release was created"
           fi
