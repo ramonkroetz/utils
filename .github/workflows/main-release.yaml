@@ -1,194 +1,262 @@
-name: Create Release
+name: CI and Release
 
 on:
+  # Manual trigger for releases only
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Release type'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - major
+          - minor
+          - patch
+      custom_version:
+        description: 'Custom version (e.g., 1.2.3) - leave empty to auto-increment'
+        required: false
+        type: string
+  
+  # CI triggers - run on PRs and pushes to main
   push:
     branches:
       - main
   pull_request:
-    types:
-      - closed
     branches:
       - main
 
 jobs:
+  ci-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set Node.js Version with NVM
+        run: |
+          nvm install
+          nvm use
+        shell: bash -l {0}
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Linter
+        run: npm run lint
+
+      - name: Tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: CI Summary
+        run: |
+          echo "=== CI Checks Completed ==="
+          echo "All checks passed successfully!"
+          echo "Branch: ${{ github.ref }}"
+          echo "Commit: ${{ github.sha }}"
+
   release-publish:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
-      contents: write    
+      contents: write
       pull-requests: read
-    # Only run this job when PR is merged (not on regular pushes to main)
-    if: github.event_name != 'push' || github.event.pull_request.merged == true
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0   # Fetch all history for proper tagging
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-    - name: Set Node.js Version with NVM
-      run: |
-        nvm install
-        nvm use
-      shell: bash -l {0}
+      - name: Log manual trigger info
+        run: |
+          echo "=== Manual Release Trigger ==="
+          echo "Triggered by: ${{ github.actor }}"
+          echo "Release type: ${{ github.event.inputs.release_type }}"
+          echo "Custom version: ${{ github.event.inputs.custom_version }}"
 
-    - name: Install Dependencies
-      run: npm ci
+      - name: Set Node.js Version with NVM
+        run: |
+          nvm install
+          nvm use
+        shell: bash -l {0}
 
-    - name: Linter
-      run: |
-        npm run lint
-    
-    - name: Tests
-      run: npm test
+      - name: Install Dependencies
+        run: npm ci
 
-    - name: Build
-      run: npm run build
+      - name: Run CI checks before release
+        run: |
+          echo "Running pre-release checks..."
+          npm run lint
+          npm test
+          npm run build
+          echo "All pre-release checks passed!"
 
-    - name: Get latest release details
-      id: get-release
-      run: |
-        RECENT_RELEASES_ARRAY=$(curl -qsSL \
-          -H "Accept: application/vnd.github+json" \
-          -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          "${{ github.api_url }}/repos/${{ github.repository }}/releases")
+      - name: Get latest release details
+        id: get-release
+        run: |
+          RECENT_RELEASES_ARRAY=$(curl -qsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${{ github.api_url }}/repos/${{ github.repository }}/releases")
 
-        RECENT_RELEASE=$(echo "$RECENT_RELEASES_ARRAY" | jq '.[0]')
+          RECENT_RELEASE=$(echo "$RECENT_RELEASES_ARRAY" | jq '.[0]')
 
-        echo "IS_PRE_RELEASE=$(echo "$RECENT_RELEASE" | jq -r '.prerelease')" >> $GITHUB_ENV
-        echo "TAG_NAME=$(echo "$RECENT_RELEASE" | jq -r '.tag_name')" >> $GITHUB_ENV
+          echo "TAG_NAME=$(echo "$RECENT_RELEASE" | jq -r '.tag_name')" >> $GITHUB_ENV
 
-    - name: Create new tag
-      id: newtag
-      env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        # Only try to fetch labels if this is a pull_request event
-        if [[ "${{ github.event_name }}" == "pull_request" ]] && [[ "${{ github.event.pull_request.merged }}" == "true" ]]; then
-          echo "Processing merged pull request #${{ github.event.pull_request.number }}"
-          LABELS=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }} --jq '.labels.[].name' || echo "")
-        else
-          LABELS=""
-          echo "Not a merged pull request event, skipping label check."
-        fi
-
-        echo "Labels found: $LABELS"
-        echo "Latest tag: ${{ env.TAG_NAME }}"
-
-        # If there's no latest release (meaning it's the first release)
-        if [[ -z "${{ env.TAG_NAME }}" ]] || [[ "${{ env.TAG_NAME }}" == "null" ]]; then
-          NEW_TAG="v1.0.0"
-          TYPE="MINOR"
-          echo "type=$TYPE" >> $GITHUB_OUTPUT
-          echo "tag=$NEW_TAG" >> $GITHUB_OUTPUT
-          echo "First release detected, using $NEW_TAG"
-          exit 0
-        fi
-
-        CURRENT_TAG=${{ env.TAG_NAME }}
-        IFS='.' read -ra VERSION <<< "$(echo $CURRENT_TAG | tr -d 'v')"
-
-        MAJOR=${VERSION[0]}
-        MINOR=${VERSION[1]}
-        PATCH=${VERSION[2]}
-
-        TYPE="PATCH"
-
-        # Convert LABELS string to array for proper iteration
-        if [[ -n "$LABELS" ]]; then
-          IFS=$'\n' read -rd '' -a LABEL_ARRAY <<< "$LABELS"
-          for LABEL in "${LABEL_ARRAY[@]}"; do 
-            LABEL=$(echo "$LABEL" | tr -d '"')
-            if [[ "$LABEL" == "major" ]]; then
-              MAJOR=$((MAJOR + 1))
-              MINOR=0
-              PATCH=0
-              TYPE="MAJOR"
-              echo "Major release bump detected from label"
-              break
-            elif [[ "$LABEL" == "minor" ]]; then
-              MINOR=$((MINOR + 1))
-              PATCH=0
-              TYPE="MINOR"
-              echo "Minor release bump detected from label"
-              break
+      - name: Determine new version
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Current latest tag: ${{ env.TAG_NAME }}"
+          
+          # Handle manual dispatch with custom version
+          if [[ -n "${{ github.event.inputs.custom_version }}" ]]; then
+            CUSTOM_VERSION="${{ github.event.inputs.custom_version }}"
+            # Validate custom version format
+            if [[ ! "$CUSTOM_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Error: Custom version must be in format X.Y.Z (e.g., 1.2.3)"
+              exit 1
             fi
-          done
-        fi
+            NEW_TAG="v$CUSTOM_VERSION"
+            echo "Using custom version: $NEW_TAG"
+            echo "type=custom" >> $GITHUB_OUTPUT
+            echo "tag=$NEW_TAG" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Handle manual dispatch with release type
+          RELEASE_TYPE="${{ github.event.inputs.release_type }}"
+          echo "Manual release type: $RELEASE_TYPE"
+          
+          # Calculate new version
+          if [[ -z "${{ env.TAG_NAME }}" ]] || [[ "${{ env.TAG_NAME }}" == "null" ]]; then
+            # First release
+            NEW_TAG="v1.0.0"
+          else
+            CURRENT_TAG="${{ env.TAG_NAME }}"
+            # Remove 'v' prefix if present
+            CURRENT_TAG="${CURRENT_TAG#v}"
+            IFS='.' read -ra VERSION <<< "$CURRENT_TAG"
+            
+            MAJOR=${VERSION[0]}
+            MINOR=${VERSION[1]}
+            PATCH=${VERSION[2]}
+            
+            case "$RELEASE_TYPE" in
+              "major")
+                MAJOR=$((MAJOR + 1))
+                MINOR=0
+                PATCH=0
+                ;;
+              "minor")
+                MINOR=$((MINOR + 1))
+                PATCH=0
+                ;;
+              "patch")
+                PATCH=$((PATCH + 1))
+                ;;
+            esac
+            
+            NEW_TAG="v$MAJOR.$MINOR.$PATCH"
+          fi
+          
+          echo "New tag: $NEW_TAG"
+          echo "type=$RELEASE_TYPE" >> $GITHUB_OUTPUT
+          echo "tag=$NEW_TAG" >> $GITHUB_OUTPUT
 
-        if [[ "$TYPE" == "PATCH" ]]; then
-            PATCH=$((PATCH + 1))
-            echo "Defaulting to patch release bump"
-        fi
+      - name: Confirm release
+        if: steps.version.outputs.tag
+        run: |
+          echo "========================================="
+          echo "RELEASE CONFIRMATION"
+          echo "========================================="
+          echo "New version: ${{ steps.version.outputs.tag }}"
+          echo "Release type: ${{ steps.version.outputs.type }}"
+          echo "Current version: ${{ env.TAG_NAME }}"
+          echo "========================================="
+          echo "This will:"
+          echo "1. Create tag: ${{ steps.version.outputs.tag }}"
+          echo "2. Create GitHub Release"
+          echo "3. Create release branch: release/${{ steps.version.outputs.tag#v }}"
+          echo "========================================="
 
-        NEW_TAG="v$MAJOR.$MINOR.$PATCH"
+      - name: Create Git Tag
+        if: steps.version.outputs.tag
+        run: |
+          git config --global user.name "${GITHUB_ACTOR}"
+          git config --global user.email "${GITHUB_ACTOR}@users.noreply.github.com"
+          git tag ${{ steps.version.outputs.tag }}
+          git push origin ${{ steps.version.outputs.tag }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-        echo "Release type: $TYPE"
-        echo "New tag: $NEW_TAG"
-        echo "type=$TYPE" >> $GITHUB_OUTPUT
-        echo "tag=$NEW_TAG" >> $GITHUB_OUTPUT
+      - name: Create GitHub Release
+        if: steps.version.outputs.tag
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "Release ${{ steps.version.outputs.tag }}"
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            **Release Type:** ${{ steps.version.outputs.type }}
+            **Triggered by:** ${{ github.actor }}
+            
+            ---
+            
+            Automated release created via GitHub Actions workflow.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    # Create Git tag first
-    - name: Create Git Tag
-      if: steps.newtag.outputs.tag
-      run: |
-        git config --global user.name "${GITHUB_ACTOR}"
-        git config --global user.email "${GITHUB_ACTOR}@users.noreply.github.com"
-        git tag ${{ steps.newtag.outputs.tag }}
-        git push origin ${{ steps.newtag.outputs.tag }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract version number
+        id: extract-version
+        run: |
+          RELEASE_VERSION="${{ steps.version.outputs.tag }}"
+          # Remove the 'v' prefix
+          CLEAN_VERSION="${RELEASE_VERSION#v}"
+          echo "RELEASE_VERSION=$CLEAN_VERSION" >> $GITHUB_ENV
+          echo "release_version=$CLEAN_VERSION" >> $GITHUB_OUTPUT
 
-    # Use a more modern release action
-    - name: Create GitHub Release
-      if: steps.newtag.outputs.tag
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: ${{ steps.newtag.outputs.tag }}
-        name: "Release ${{ steps.newtag.outputs.tag }}"
-        draft: false
-        prerelease: false
-        generate_release_notes: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create and push release branch
+        if: steps.version.outputs.tag
+        run: |
+          git config --global user.name "${GITHUB_ACTOR}"
+          git config --global user.email "${GITHUB_ACTOR}@users.noreply.github.com"
+          
+          # Create release branch
+          git checkout -b release/${{ env.RELEASE_VERSION }}
+          
+          # Update package.json version (without creating a tag)
+          npm version ${{ env.RELEASE_VERSION }} --no-git-tag-version --allow-same-version
+          
+          # Commit the version change
+          git add package.json
+          git commit -m "chore: update version to ${{ env.RELEASE_VERSION }}"
+          
+          # Push to remote
+          git push --set-upstream origin release/${{ env.RELEASE_VERSION }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    # Get the release version from the tag we just created
-    - name: Set release version env var
-      id: set-version
-      run: |
-        RELEASE_VERSION="${{ steps.newtag.outputs.tag }}"
-        # Remove the 'v' prefix
-        CLEAN_VERSION="${RELEASE_VERSION#v}"
-        echo "RELEASE_VERSION=$CLEAN_VERSION" >> $GITHUB_ENV
-        echo "release_version=$CLEAN_VERSION" >> $GITHUB_OUTPUT
-        echo "Extracted release version: $CLEAN_VERSION"
-
-    # Wait a moment for GitHub to process the release
-    - name: Wait for release propagation
-      if: steps.newtag.outputs.tag
-      run: sleep 5
-
-    - name: Debug
-      run: |
-        echo "Release version from env: ${{ env.RELEASE_VERSION }}"
-        echo "Release version from output: ${{ steps.set-version.outputs.release_version }}"
-    
-    - name: Create and push release branch
-      if: steps.newtag.outputs.tag
-      run: |
-        git config --global user.name "${GITHUB_ACTOR}"
-        git config --global user.email "${GITHUB_ACTOR}@users.noreply.github.com"
-        
-        # Create release branch
-        git checkout -b release/${{ env.RELEASE_VERSION }}
-        
-        # Update package.json version (without creating a tag)
-        npm version ${{ env.RELEASE_VERSION }} --no-git-tag-version
-        
-        # Commit the version change
-        git add package.json
-        git commit -m "chore: update version to ${{ env.RELEASE_VERSION }} for release"
-        
-        # Push to remote
-        git push --set-upstream origin release/${{ env.RELEASE_VERSION }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Release Summary
+        if: always()
+        run: |
+          echo "=== Release Summary ==="
+          echo "Status: ${{ job.status }}"
+          if [[ "${{ steps.version.outputs.tag }}" != "" ]]; then
+            echo "✅ Release created: ${{ steps.version.outputs.tag }}"
+            echo "📋 Release type: ${{ steps.version.outputs.type }}"
+            echo "🌿 Release branch: release/${{ env.RELEASE_VERSION }}"
+            echo ""
+            echo "Next steps:"
+            echo "1. Review the release at: https://github.com/${{ github.repository }}/releases"
+            echo "2. The release branch 'release/${{ env.RELEASE_VERSION }}' has been created"
+          else
+            echo "❌ No release was created"
+          fi
